@@ -24,15 +24,23 @@ public class RabbitMQTest {
 	@Autowired
 	private ProducerExample producerExample;
 	
+	@Autowired
+	private ConsumerExample consumerExample;
+	
 	@Test
 	public void produce(){
-		for(int i = 0; i < 10; i++){
+		for(int i = 0; i < 3; i++){
 			UserMessage userMessage = new UserMessage(1000+i, "gaoweigang"+i);
 			producerExample.send(userMessage);
 
 		}
-		
-		
+	}
+	
+	@Test
+	public void consume(){
+		for(int i= 0; i < 2 ; i++){
+			consumerExample.consume();
+		}
 	}
 	
 

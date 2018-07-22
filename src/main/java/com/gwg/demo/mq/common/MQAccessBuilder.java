@@ -58,11 +58,9 @@ public class MQAccessBuilder {
 	// 4 构造sender方法
 	public MessageProducer buildMessageSender(final String exchange, final String routingKey, final String queue,
 			final String type) throws IOException {
-		logger.info("buildMessageSender 创建新连接 start .....");
 		Connection connection = connectionFactory.createConnection();
 		// 1
 		if (type.equals("direct")) {
-			logger.info("buildMessageSender 构造交换器和队列 ，并将交换器和队列绑定 start .....");
 			buildQueue(exchange, routingKey, queue, connection, "direct");
 		} else if (type.equals("topic")) {
 			buildTopic(exchange, connection);
@@ -74,18 +72,16 @@ public class MQAccessBuilder {
 		rabbitTemplate.setExchange(exchange);
 		rabbitTemplate.setRoutingKey(routingKey);
 		// 2
-		logger.info("设置message序列化方法 start....");
 		rabbitTemplate.setMessageConverter(new Jackson2JsonMessageConverter());
 		RetryCache retryCache = new RetryCache();
 
 		//3.
-		logger.info("设置发送确认,确认消息有没有路由到exchange,不管有没有路由到exchange上，都会回调该方法.....");
 		rabbitTemplate.setConfirmCallback((correlationData, ack, cause) -> {
 			logger.info("发送消息确认, correlationData:{}, ack:{},cause:{}", JSON.toJSON(correlationData), ack, cause);
 			if (!ack) {
 				logger.info("send message failed: " + cause + correlationData.toString());
 			} else {
-				logger.info("producer在收到确认消息后，删除本地缓存,correlationData:{}", JSON.toJSON(correlationData));
+				logger.info("producer在收到确认消息后，删除本地缓存,correlationData id:{}", correlationData.getId());
 				//消息路由到exhange成功，删除本地缓存，我们发送的每条消息都会与correlationData相关，而correlationData中的id是我们自己指定的
 				retryCache.del(Long.valueOf(correlationData.getId()));
 			}
@@ -167,7 +163,11 @@ public class MQAccessBuilder {
 
 		// 3 匿名类
 		return new MessageConsumer() {
-			Channel channel = connection.createChannel(false);
+			Channel channel = null;
+			{
+			channel = connection.createChannel(false);
+			channel.basicQos(0, 10, false);//设置服务的质量(quality-of-service)
+			}
 
 			// 1 通过basicGet获取原始数据
 			// 2 将原始数据转换为特定类型的包
@@ -177,15 +177,13 @@ public class MQAccessBuilder {
 			public DetailRes consume() {
 				try {
 					// 1
-					logger.info("通过basicGet获取原始数据 start........");
 					GetResponse response = channel.basicGet(queue, false);
-                    logger.info("原始数据格式：{}", JSON.toJSON(response));
+					logger.info("通过basicGet获取原始数据 start........，线程id：{}", Thread.currentThread().getId());
 					while (response == null) {
-						logger.info("如果没有获取到原始数据，则睡眠一秒之后再尝试获取");
+						logger.info("再次尝试通过basicGet获取原始数据 start........,线程ID:{}", Thread.currentThread().getId());
 						response = channel.basicGet(queue, false);
 						Thread.sleep(Constants.ONE_SECOND);
 					}
-                    logger.info("原始数据：body:{}, props:{}, MessageCount:{}, Envelope：{}", response.getBody(), response.getProps(), response.getMessageCount(), response.getEnvelope());
 					Message message = new Message(response.getBody(), messagePropertiesConverter
 							.toMessageProperties(response.getProps(), response.getEnvelope(), "UTF-8"));
 
@@ -197,14 +195,14 @@ public class MQAccessBuilder {
 					DetailRes detailRes;
 
 					try {
-						logger.info("process 开始处理消息 start......,消息内容：{}", JSON.toJSON(messageBean));
+						logger.info("process 准备处理消息 start......,消息内容：{}", JSON.toJSON(messageBean));
 						detailRes = messageProcess.process(messageBean);
 					} catch (Exception e) {
 						log.error("exception", e);
 						detailRes = new DetailRes(false, "process exception: " + e);
 					}
 
-					// 4 只有在消息处理成功后发送ack确认，或失败后发送nack使信息重新投递，使用springboot来改写测试信息重新投递
+					// 4 只有在消息处理成功后发送ack确认，或失败后发送nack使信息重新投递
 					if (detailRes.isSuccess()) {
 						logger.info("ack确认：{}", response.getEnvelope().getDeliveryTag());
 						/**
@@ -227,7 +225,8 @@ public class MQAccessBuilder {
 					     * multiple = false: 仅仅拒绝提供的 投递标识。
 					     * requeue = true：被拒绝的是否重新入队列，而不是丢弃/死信
 					     */
-						channel.basicNack(response.getEnvelope().getDeliveryTag(), true, true);
+						//channel.basicRecover(false);//消费失败之后，broker重新投递消息
+						channel.basicNack(response.getEnvelope().getDeliveryTag(), false, true);//前提需要设置手动确认，否则无效
 					}
 
 					return detailRes;
